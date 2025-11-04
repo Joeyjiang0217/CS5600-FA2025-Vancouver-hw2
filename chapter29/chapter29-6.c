@@ -1,0 +1,141 @@
+// Hash table with PER-BUCKET locks + 5-run benchmark.
+// 4 threads; each run does {10k,20k,30k,40k,50k} updates/thread.
+// Build: gcc -O2 -pthread hash_bucket_lock_bench.c -o hbench_bucket
+#define _GNU_SOURCE
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <time.h>
+
+#define THREADS    4
+#define RUNS       5
+#define BUCKETS    101         // try larger (e.g., 1024) to see even more scaling
+#define KEY_SPACE  1000000
+
+// -------- timing + RNG --------
+static inline double now_sec(void){
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts);
+    return ts.tv_sec + ts.tv_nsec*1e-9;
+}
+static inline uint32_t xorshift32(uint32_t *s){
+    uint32_t x=*s; x^=x<<13; x^=x>>17; x^=x<<5; return *s=x;
+}
+
+// -------- singly linked list (no internal locks) --------
+typedef struct node { int key; struct node* next; } node_t;
+typedef struct { node_t* head; } list_t;
+
+static void List_Init(list_t* L){ L->head=NULL; }
+
+static inline bool List_Lookup_unlocked(list_t* L, int k){
+    for(node_t* c=L->head; c; c=c->next) if(c->key==k) return true;
+    return false;
+}
+static inline bool List_Insert_unlocked(list_t* L, int k){
+    for(node_t* c=L->head; c; c=c->next) if(c->key==k) return false;
+    node_t* n=(node_t*)malloc(sizeof(*n)); if(!n) return false;
+    n->key=k; n->next=L->head; L->head=n; return true;
+}
+static inline bool List_Delete_unlocked(list_t* L, int k){
+    node_t** pp=&L->head; node_t* c=L->head;
+    while(c){ if(c->key==k){ *pp=c->next; free(c); return true; }
+              pp=&c->next; c=c->next; }
+    return false;
+}
+
+// -------- hash table with PER-BUCKET locks --------
+typedef struct {
+    list_t*         lists;                 // buckets
+    pthread_mutex_t *bucket_locks;         // one lock per bucket
+    int             nbk;
+} hash_t;
+
+static void Hash_Init(hash_t* H, int nbk){
+    H->nbk = nbk;
+    H->lists = (list_t*)malloc(sizeof(list_t)*nbk);
+    H->bucket_locks = (pthread_mutex_t*)malloc(sizeof(pthread_mutex_t)*nbk);
+    for(int i=0;i<nbk;i++){
+        List_Init(&H->lists[i]);
+        pthread_mutex_init(&H->bucket_locks[i], NULL);
+    }
+}
+
+static inline int bkt(const hash_t* H, int k){
+    unsigned u = (unsigned)k;
+    return (int)(u % (unsigned)H->nbk);
+}
+
+// Toggle update under the *bucket* lock:
+//   - if k exists: delete
+//   - else: insert
+static inline void Hash_Update(hash_t* H, int k){
+    int b = bkt(H,k);
+    pthread_mutex_lock(&H->bucket_locks[b]);
+    if(!List_Insert_unlocked(&H->lists[b], k)){
+        (void)List_Delete_unlocked(&H->lists[b], k);
+    }
+    pthread_mutex_unlock(&H->bucket_locks[b]);
+}
+
+// -------- worker + benchmark harness --------
+typedef struct {
+    hash_t* H;
+    uint32_t seed;
+    int key_space;
+    uint32_t ops;
+    pthread_barrier_t* bar;
+} worker_arg_t;
+
+static void* worker(void* a_){
+    worker_arg_t* a=(worker_arg_t*)a_;
+    uint32_t s = a->seed;
+    pthread_barrier_wait(a->bar);          // one-barrier start
+    for(uint32_t i=0;i<a->ops;i++){
+        int k = 1 + (int)(xorshift32(&s) % a->key_space);
+        Hash_Update(a->H, k);
+    }
+    return NULL;
+}
+
+int main(void){
+    const int ops_per_thread[RUNS] = {10000,20000,30000,40000,50000};
+    printf("Hash table with PER-BUCKET locks ¡ª 4 threads ¡Á {10k..50k} updates\n");
+    printf("Buckets=%d, KeySpace=%d\n\n", BUCKETS, KEY_SPACE);
+
+    for(int r=0; r<RUNS; ++r){
+        int ops = ops_per_thread[r];
+        hash_t H; Hash_Init(&H, BUCKETS);
+
+        pthread_t th[THREADS];
+        worker_arg_t wa[THREADS];
+        pthread_barrier_t start_barrier;
+        pthread_barrier_init(&start_barrier, NULL, THREADS+1);
+
+        for(int i=0;i<THREADS;i++){
+            wa[i].H = &H;
+            wa[i].seed = (uint32_t)(0x9e3779b9u ^ (i+1)*12345);
+            wa[i].key_space = KEY_SPACE;
+            wa[i].ops = (uint32_t)ops;
+            wa[i].bar = &start_barrier;
+            pthread_create(&th[i], NULL, worker, &wa[i]);
+        }
+
+        double t0 = now_sec();
+        pthread_barrier_wait(&start_barrier);
+        for(int i=0;i<THREADS;i++) pthread_join(th[i], NULL);
+        double t1 = now_sec();
+
+        double secs = t1 - t0;
+        double total_ops = (double)THREADS * ops;
+        double throughput = total_ops / secs;
+        printf("Run %d: %d updates/thread (total %d) -> %.6f s, %.0f ops/s\n",
+               r+1, ops, (int)total_ops, secs, throughput);
+
+        pthread_barrier_destroy(&start_barrier);
+        // (For a quick benchmark we skip freeing nodes; process exit will reclaim.)
+    }
+
+    return 0;
+}
