@@ -103,7 +103,7 @@ static int dblcmp(const void* a, const void* b) {
 
 int main(void) {
     const uint64_t PER_THREAD = 1000000ULL;  // 1M per thread
-    const int TRIALS = 1;                    // run several times, take median
+    const int TRIALS = 5;                    // run several times, take median
 
     long ncpus = sysconf(_SC_NPROCESSORS_ONLN);
     if (ncpus < 1) ncpus = 1;
