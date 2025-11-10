@@ -30,7 +30,6 @@ void rwlock_acquire_readlock(rwlock_t *rw) {
 }
 
 void rwlock_release_readlock(rwlock_t *rw) {
-
     Sem_wait(&rw->lock);
     rw->readers--;
     if (rw->readers == 0) {

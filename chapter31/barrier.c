@@ -16,8 +16,8 @@ typedef struct __barrier_t {
     // add semaphores and other information here
     sem_t mutex;
     sem_t barrier;
-    int n;
-    int count;
+    int n;            // number of threads required to pass the barrier
+    int count;        // number of threads currently at the barrier
 } barrier_t;
 
 
@@ -28,20 +28,20 @@ void barrier_init(barrier_t *b, int num_threads) {
     // initialization code goes here
     Sem_init(&b->mutex, 1);
     Sem_init(&b->barrier, 0);
-    b->n = 0;
-    b->count = num_threads;
+    b->n = num_threads;
+    b->count = 0;
 }
 
 void barrier(barrier_t *b) {
     // barrier code goes here
     Sem_wait(&b->mutex);
-    b->n += 1;
-    if (b->n == b->count) {
+    b->count += 1;
+    if (b->count == b->n) {
         // last thread to arrive
-        for (int i = 0; i < b->count - 1; i++) {
+        for (int i = 0; i < b->n - 1; i++) {
             Sem_post(&b->barrier);
         }
-        b->n = 0;
+        b->count = 0;
         Sem_post(&b->mutex);
     }
     else
